@@ -6,29 +6,58 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 // Middleware
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
 app.use(cors());
 
-// Your credentials - Railway will let you set these as environment variables
-const accountSid = process.env.TWILIO_ACCOUNT_SID || 'your_twilio_account_sid_here';
-const authToken = process.env.TWILIO_AUTH_TOKEN || 'your_twilio_auth_token_here';
-const twilioPhoneNumber = process.env.TWILIO_PHONE_NUMBER || '+1234567890';
-const recruiterPhoneNumber = process.env.RECRUITER_PHONE_NUMBER || '+1987654321';
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error('Error:', err);
+  res.status(500).json({ error: 'Internal server error' });
+});
 
-const client = twilio(accountSid, authToken);
+// Your credentials from environment variables
+const accountSid = process.env.TWILIO_ACCOUNT_SID;
+const authToken = process.env.TWILIO_AUTH_TOKEN;
+const twilioPhoneNumber = process.env.TWILIO_PHONE_NUMBER;
+const recruiterPhoneNumber = process.env.RECRUITER_PHONE_NUMBER;
+
+// Initialize Twilio client only if credentials exist
+let client;
+if (accountSid && authToken) {
+  try {
+    client = twilio(accountSid, authToken);
+    console.log('Twilio client initialized successfully');
+  } catch (error) {
+    console.error('Twilio initialization error:', error.message);
+  }
+}
 
 // Health check endpoint
 app.get('/', (req, res) => {
-  res.json({ 
-    message: 'Teamtailor-Twilio webhook is running!', 
-    timestamp: new Date().toISOString() 
-  });
+  try {
+    res.json({ 
+      message: 'Teamtailor-Twilio webhook is running!', 
+      timestamp: new Date().toISOString(),
+      status: 'active',
+      hasCredentials: !!(accountSid && authToken)
+    });
+  } catch (error) {
+    console.error('Root endpoint error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
 // Main webhook endpoint
 app.post('/webhook', async (req, res) => {
   try {
     console.log('Received webhook:', JSON.stringify(req.body, null, 2));
+    
+    // Check if Twilio is configured
+    if (!client) {
+      console.log('Twilio not configured - webhook received but no SMS sent');
+      return res.json({ success: true, message: 'Webhook received but Twilio not configured' });
+    }
     
     const webhookData = req.body;
     
@@ -40,7 +69,7 @@ app.post('/webhook', async (req, res) => {
       let jobTitle = 'Unknown position';
       let candidateEmail = '';
       
-      // Try to get candidate details (Teamtailor webhook structure can vary)
+      // Try to get candidate details
       if (webhookData.data && webhookData.data.attributes) {
         candidateName = webhookData.data.attributes.name || webhookData.data.attributes.first_name || candidateName;
         candidateEmail = webhookData.data.attributes.email || '';
@@ -74,18 +103,10 @@ app.post('/webhook', async (req, res) => {
         job: jobTitle
       });
       
-    } else if (webhookData.type === 'candidate_updated' || webhookData.event === 'candidate_updated') {
-      
-      // Handle candidate updates (optional)
-      console.log('Candidate updated - no SMS sent');
-      res.json({ success: true, message: 'Candidate updated event received' });
-      
     } else {
-      
       // Handle other events
       console.log('Event received but no action taken:', webhookData.type || webhookData.event);
       res.json({ success: true, message: 'Webhook received but no action configured for this event type' });
-      
     }
     
   } catch (error) {
@@ -100,6 +121,10 @@ app.post('/webhook', async (req, res) => {
 // Test endpoint to verify Twilio connection
 app.get('/test-sms', async (req, res) => {
   try {
+    if (!client) {
+      return res.status(500).json({ error: 'Twilio not configured. Check your environment variables.' });
+    }
+    
     const message = await client.messages.create({
       body: 'Test message from your Teamtailor-Twilio integration! 🎉',
       from: twilioPhoneNumber,
@@ -108,12 +133,26 @@ app.get('/test-sms', async (req, res) => {
     
     res.json({ success: true, messageSid: message.sid });
   } catch (error) {
+    console.error('Test SMS error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-app.listen(port, () => {
+// Catch all other routes
+app.get('*', (req, res) => {
+  res.json({ 
+    message: 'Teamtailor-Twilio webhook server', 
+    endpoints: {
+      health: '/',
+      webhook: '/webhook',
+      test: '/test-sms'
+    }
+  });
+});
+
+app.listen(port, '0.0.0.0', () => {
   console.log(`Server running on port ${port}`);
   console.log(`Webhook endpoint: /webhook`);
   console.log(`Test endpoint: /test-sms`);
+  console.log(`Environment check - Has Twilio credentials: ${!!(accountSid && authToken)}`);
 });
